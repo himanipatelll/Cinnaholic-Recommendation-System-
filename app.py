@@ -3,71 +3,90 @@ import pandas as pd
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
-st.set_page_config(page_title="Cinnaholic Flavor Recommender", page_icon="🍰")
+st.set_page_config(page_title="Cinnaholic Flavor Recommender", page_icon="🍰", layout="centered")
 
 @st.cache_data
-def load_data(path: str) -> pd.DataFrame:
+def load_menu(path: str) -> pd.DataFrame:
     df = pd.read_csv(path)
 
-    # Ensure column exists
-    if "flavor_tags" not in df.columns:
-        raise ValueError("menu.csv must contain a 'flavor_tags' column.")
+    required = {"item_id", "name", "type", "flavor_tags"}
+    missing = required - set(df.columns)
+    if missing:
+        raise ValueError(f"menu.csv is missing columns: {missing}")
 
-    # Handle missing tags safely
+    # Clean + normalize
+    df["name"] = df["name"].astype(str).str.strip()
+    df["type"] = df["type"].astype(str).str.strip().str.lower()
+
     df["flavor_tags"] = df["flavor_tags"].fillna("").astype(str)
-    df["flavor_tags_list"] = df["flavor_tags"].apply(
-        lambda x: [tag.strip().lower() for tag in x.split(",") if tag.strip()]
-    )
-    df["tags_str"] = df["flavor_tags_list"].apply(lambda tags: " ".join(tags))
+
+    # Convert "salty, fruity" -> ["salty","fruity"] (trim spaces, drop empties)
+    def parse_tags(s: str):
+        tags = []
+        for t in s.split(","):
+            t = t.strip().lower()
+            if t:  # removes empty tags caused by trailing commas like "nutty,"
+                tags.append(t)
+        return tags
+
+    df["tags_list"] = df["flavor_tags"].apply(parse_tags)
+    df["tags_str"] = df["tags_list"].apply(lambda tags: " ".join(tags))
+
     return df
 
 @st.cache_resource
 def build_vectorizer_and_matrix(text_series: pd.Series):
-    vectorizer = TfidfVectorizer(
-        lowercase=True,
-        ngram_range=(1, 2),
-        min_df=1
-    )
+    vectorizer = TfidfVectorizer(ngram_range=(1, 2), lowercase=True)
     matrix = vectorizer.fit_transform(text_series)
     return vectorizer, matrix
 
-df = load_data("menu.csv")
+df = load_menu("menu.csv")
 vectorizer, tag_matrix = build_vectorizer_and_matrix(df["tags_str"])
 
 st.title("🍰 Cinnaholic Flavor Recommender")
-st.caption("Type flavor vibes (e.g., fruity creamy chocolatey). The app recommends menu items based on tag similarity.")
+st.caption("Type flavor vibes (e.g., fruity, creamy, chocolatey). Recommendations are based on menu tag similarity.")
 
-preferences = st.text_input("Enter your flavor preferences:", placeholder="fruity creamy chocolatey")
+preferences = st.text_input(
+    "Enter your flavor preferences:",
+    placeholder="fruity creamy chocolatey"
+)
 
 col1, col2 = st.columns(2)
 with col1:
-    top_n = st.slider("How many recommendations per category?", 1, 10, 5)
+    top_n = st.slider("How many results per category?", 1, 10, 5)
 with col2:
-    types = st.multiselect("Show categories:", ["roll", "frosting", "topping"], default=["roll", "frosting", "topping"])
+    allowed_types = ["roll", "frosting", "topping", "other"]
+    types = st.multiselect("Categories:", allowed_types, default=["roll", "frosting", "topping"])
 
 if preferences:
-    pref_vector = vectorizer.transform([preferences.lower().strip()])
+    pref_vector = vectorizer.transform([preferences.strip().lower()])
     similarity_scores = cosine_similarity(pref_vector, tag_matrix).flatten()
 
     recs = df.copy()
     recs["similarity"] = similarity_scores
 
-    # Optional: remove items with zero similarity so results feel meaningful
-    recs = recs[recs["similarity"] > 0].sort_values("similarity", ascending=False)
+    # Keep only chosen categories
+    recs = recs[recs["type"].isin(types)]
 
-    if recs.empty:
-        st.warning("No matches found. Try different keywords (e.g., cinnamon, caramel, nutty, vanilla).")
+    # Sort best matches
+    recs = recs.sort_values("similarity", ascending=False)
+
+    # Optionally hide zero-similarity items so it feels smarter
+    recs_nonzero = recs[recs["similarity"] > 0]
+
+    if recs_nonzero.empty:
+        st.warning("No strong matches found. Try keywords like: cinnamon, caramel, nutty, tangy, rich, zesty.")
     else:
-        st.subheader("Recommendations")
+        st.subheader("Top Recommendations")
 
         for t in types:
-            subset = recs[recs["type"].str.lower() == t].head(top_n)
-            st.markdown(f"### Top Recommended {t.title()}s")
+            subset = recs_nonzero[recs_nonzero["type"] == t].head(top_n)
+            st.markdown(f"### {t.title()}s")
+
             if subset.empty:
                 st.write("No matches in this category.")
             else:
-                # Show name + similarity + tags for transparency
                 st.dataframe(
-                    subset[["name", "similarity", "flavor_tags"]],
+                    subset[["item_id", "name", "flavor_tags", "similarity"]],
                     use_container_width=True
                 )
